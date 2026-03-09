@@ -9,7 +9,7 @@ const nextConfig: NextConfig = {
       // https://<ngrok>/stream.m3u8  and  https://<ngrok>/stream*.ts
       {
         source: "/stream:slug*",
-        destination: `${VIDEO_SERVICE_URL}/hls/stream:slug*`,
+        destination: `${VIDEO_SERVICE_URL}/stream/stream:slug*`,
       },
       // Legacy per-stream paths (fallback)
       {

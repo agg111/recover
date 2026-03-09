@@ -407,121 +407,75 @@ def list_videos():
 # ── Live Stream Analysis ──────────────────────────────────────────────────────
 
 class LiveStreamStartRequest(BaseModel):
+    stream_url: str                  # Cloudflared / public HLS URL, e.g. https://xxx.trycloudflare.com/stream.m3u8
     injury_type: Optional[str] = None
     exercise_name: Optional[str] = None
 
 
 @app.post("/livestream/start")
 def start_livestream(req: LiveStreamStartRequest):
-    """Start an HLS-backed NomadicML livestream session."""
+    """Register a user-provided HLS URL and start a NomadicML livestream session.
+
+    The caller (user) is responsible for running FFmpeg + HTTP server + cloudflared
+    locally to produce the public stream_url. We just forward it to NomadicML.
+    """
     stream_id = str(uuid.uuid4())[:8]
-    stream_dir = f"{HLS_DIR}/{stream_id}"
-    os.makedirs(stream_dir, exist_ok=True)
+    exercise  = req.exercise_name or "rehabilitation exercise"
+    injury    = req.injury_type   or "injury"
+    # Short event descriptions work best with NomadicML — mirrors the ASK approach
+    queries = [
+        f"incorrect form or poor posture during {exercise}",
+        f"limited range of motion or incomplete movement during {exercise}",
+        f"compensation pattern or asymmetric movement during {exercise}",
+    ]
 
-    # Fixed HLS path: {PUBLIC_VIDEO_SERVICE_URL}/stream.m3u8
-    # Segments are stream0.ts, stream1.ts, ... served from the same base URL
-    hls_playlist = os.path.join(HLS_DIR, "stream.m3u8")
-    hls_url      = f"{PUBLIC_VIDEO_SERVICE_URL}/stream.m3u8"
-    exercise     = req.exercise_name or "rehabilitation exercise"
-    injury       = req.injury_type   or "injury"
-    query        = (
-        f"Analyze this {exercise} for a patient recovering from {injury}. "
-        f"Report form issues, range-of-motion problems, and compensation patterns "
-        f"with timestamps and severity."
-    )
-
-    # Remove any stale HLS files from a previous session
-    for f in os.listdir(HLS_DIR):
-        if f.startswith("stream"):
-            try: os.remove(os.path.join(HLS_DIR, f))
-            except: pass
-
-    # ffmpeg: read webm from stdin → HLS segments on disk
-    # 2-second segments so NomadicML gets data quickly
-    ffmpeg_proc = subprocess.Popen(
-        [
-            "ffmpeg", "-y",
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-i", "pipe:0",
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-g", "30", "-sc_threshold", "0",
-            "-f", "hls",
-            "-hls_time", "2",
-            "-hls_list_size", "20",
-            "-hls_flags", "append_list",
-            hls_playlist,
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-
-    active_streams[stream_id] = {
-        "ffmpeg":         ffmpeg_proc,
-        "hls_url":        hls_url,
-        "hls_dir":        HLS_DIR,
-        "query":          query,
+    state = {
+        "hls_url":        req.stream_url,
+        "queries":        queries,
         "exercise":       exercise,
         "nom_stream_id":  None,
         "nom_session_id": None,
         "active":         True,
-        "chunk_count":    0,
         "session_started": False,
     }
+    active_streams[stream_id] = state
 
-    print(f"[Livestream] ffmpeg started — stream_id={stream_id}  hls={hls_url}")
-    # NomadicML start_session is deferred until HLS data exists (triggered on 5th chunk)
+    # Start NomadicML session in background (5s delay lets the first HLS segments arrive)
+    t = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    t.submit(_start_nom_session, state, stream_id, delay=3)
+
+    print(f"[Livestream] registered stream_id={stream_id}  hls={req.stream_url}")
     return {
-        "stream_id":  stream_id,
-        "hls_url":    hls_url,
-        # These are placeholders — filled in once session starts
+        "stream_id":      stream_id,
+        "hls_url":        req.stream_url,
         "nom_stream_id":  "",
         "nom_session_id": "",
         "viewer_url":     "",
     }
 
 
-def _start_nom_session(state: dict, stream_id: str):
-    """Called in a background thread after HLS data is ready."""
+def _start_nom_session(state: dict, stream_id: str, delay: int = 0):
+    """Start NomadicML session in a background thread, optionally after a delay."""
+    if delay:
+        time.sleep(delay)
     try:
-        print(f"[Livestream] Starting NomadicML session for {stream_id}...")
+        print(f"[Livestream] Starting NomadicML session for {stream_id} — url={state['hls_url']}")
         nom = client.livestream.start_session(
             source_url=state["hls_url"],
             name=f"Live: {state['exercise']}",
-            rapid_review_query=state["query"],
+            rapid_review_query=state["queries"][0],
         )
-        state["nom_stream_id"]  = nom["stream_id"]
-        state["nom_session_id"] = nom["session_id"]
+        print(f"[Livestream] start_session response: {nom}")
+        session_id = nom["session_id"]
+        # stream_id may or may not be in the response — fall back to session_id
+        stream_id  = nom.get("stream_id") or session_id
+        state["nom_stream_id"]  = stream_id
+        state["nom_session_id"] = session_id
         state["session_started"] = True
-        print(f"[Livestream] NomadicML session started — nom={nom['stream_id']}")
+        print(f"[Livestream] NomadicML session started — stream={stream_id} session={session_id}")
     except Exception as e:
         print(f"[Livestream] NomadicML start_session failed: {e}")
-        state["session_started"] = True  # mark done even on error so SSE doesn't wait forever
-
-
-@app.post("/livestream/{stream_id}/chunk")
-async def receive_chunk(stream_id: str, request: Request):
-    """Receive a raw video chunk from the browser and pipe it to ffmpeg."""
-    state = active_streams.get(stream_id)
-    if not state or not state["active"]:
-        raise HTTPException(status_code=404, detail="Stream not found or stopped")
-    chunk = await request.body()
-    try:
-        state["ffmpeg"].stdin.write(chunk)
-        state["ffmpeg"].stdin.flush()
-    except BrokenPipeError:
-        pass
-
-    state["chunk_count"] += 1
-
-    # After 5 chunks (~5 seconds) the first HLS segment should exist — start NomadicML
-    if state["chunk_count"] == 5 and not state["session_started"]:
-        state["session_started"] = True  # prevent double-trigger
-        t = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        t.submit(_start_nom_session, state, stream_id)
-
-    return {"ok": True, "bytes": len(chunk), "chunks": state["chunk_count"]}
+        state["session_started"] = True  # prevent SSE from waiting forever
 
 
 @app.get("/livestream/{stream_id}/events")
@@ -545,18 +499,27 @@ async def livestream_events(stream_id: str):
         nom_session_id = state["nom_session_id"]
         seen: set = set()
 
+        # Tell the frontend NomadicML is connected
+        yield f"data: {json.dumps({'type': 'connected', 'message': 'Analysis ready — start your exercises!'})}\n\n"
+
         while state.get("active"):
             try:
                 session = await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: client.livestream.get_session(nom_stream_id, nom_session_id),
                 )
-                for ev in session.get("events", []):
-                    key = f"{ev.get('type')}_{ev.get('stream_time')}"
+                status = session.get("status")
+                chunks = session.get("chunk_count", 0)
+                events = session.get("events") or []
+                print(f"[Livestream] poll — status={status} chunks={chunks} events={len(events)}")
+                for ev in events:
+                    key = f"{ev.get('type')}_{ev.get('stream_time')}_{ev.get('description','')[:20]}"
                     if key not in seen:
                         seen.add(key)
+                        print(f"[Livestream] new event: {ev}")
                         yield f"data: {json.dumps(ev)}\n\n"
             except Exception as exc:
+                print(f"[Livestream] poll error: {exc}")
                 yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
             await asyncio.sleep(10)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -576,12 +539,6 @@ def stop_livestream(stream_id: str):
         raise HTTPException(status_code=404, detail="Stream not found")
 
     state["active"] = False
-    try:
-        state["ffmpeg"].stdin.close()
-        state["ffmpeg"].wait(timeout=5)
-    except Exception:
-        state["ffmpeg"].kill()
-
     nom_stream_id  = state.get("nom_stream_id")
     nom_session_id = state.get("nom_session_id")
 
@@ -607,3 +564,8 @@ def stop_livestream(stream_id: str):
 
 # Serve HLS segments (must come after all routes)
 app.mount("/hls", StaticFiles(directory=HLS_DIR), name="hls")
+
+# Also serve the user's local FFmpeg HLS output at /stream/*
+# so NomadicML can reach it via the existing ngrok → Next.js → /stream* rewrite
+os.makedirs("/tmp/stream", exist_ok=True)
+app.mount("/stream", StaticFiles(directory="/tmp/stream"), name="stream-local")

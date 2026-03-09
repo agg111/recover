@@ -305,14 +305,105 @@ async function executeTool(
   if (name === "send_reminder") {
     if (!injuryState) return "No injury profile yet.";
     const exercises = (injuryState.exercises as Array<{ name: string; description: string; reps: string }>) ?? [];
-    const note = String(input.personal_note ?? "Here's your exercise plan for today.");
+    const dos = (injuryState.dos as string[]) ?? [];
+    const donts = (injuryState.donts as string[]) ?? [];
+    const note = String(input.personal_note ?? "Here's your personalised recovery plan.");
     const type = String(input.reminder_type);
-    const exerciseHtml = exercises.map(e => `<li><strong>${e.name}</strong> — ${e.reps}<br/><span style="color:#6b7280">${e.description}</span></li>`).join("");
+    const isFollowup = type === "followup";
+
+    const exerciseHtml = exercises.map((e, i) => `
+      <tr>
+        <td style="padding:16px;border-bottom:1px solid #f3f4f6;vertical-align:top">
+          <div style="display:flex;align-items:flex-start;gap:12px">
+            <div style="background:#6366f1;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;text-align:center;line-height:28px">${i + 1}</div>
+            <div>
+              <div style="font-weight:600;font-size:15px;color:#111827;margin-bottom:2px">${e.name}</div>
+              <div style="color:#6b7280;font-size:13px;margin-bottom:6px">${e.description}</div>
+              <div style="display:inline-block;background:#ede9fe;color:#6366f1;border-radius:20px;padding:2px 10px;font-size:12px;font-weight:600">${e.reps}</div>
+            </div>
+          </div>
+        </td>
+      </tr>`).join("");
+
+    const dosHtml = dos.map(d => `<li style="margin-bottom:6px;color:#065f46">✓ ${d}</li>`).join("");
+    const dontsHtml = donts.map(d => `<li style="margin-bottom:6px;color:#991b1b">✗ ${d}</li>`).join("");
+
+    const doctorSection = injuryState.when_to_see_doctor ? `
+      <div style="background:#fef3c7;border-left:4px solid #f59e0b;border-radius:4px;padding:14px 16px;margin:24px 0">
+        <div style="font-weight:600;color:#92400e;margin-bottom:4px">⚠️ When to see a doctor</div>
+        <div style="color:#92400e;font-size:14px">${injuryState.when_to_see_doctor}</div>
+      </div>` : "";
+
+    const timelineSection = injuryState.recovery_timeline ? `
+      <div style="background:#eff6ff;border-left:4px solid #3b82f6;border-radius:4px;padding:14px 16px;margin:0 0 24px">
+        <div style="font-weight:600;color:#1e40af;margin-bottom:4px">📅 Recovery timeline</div>
+        <div style="color:#1e40af;font-size:14px">${injuryState.recovery_timeline}</div>
+      </div>` : "";
+
+    const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <div style="max-width:600px;margin:32px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.1)">
+
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%);padding:32px 32px 28px">
+      <div style="color:#fff;font-size:22px;font-weight:700;letter-spacing:-0.5px">Recover</div>
+      <div style="color:#e0e7ff;font-size:14px;margin-top:4px">AI-powered physical therapy</div>
+    </div>
+
+    <!-- Injury badge -->
+    <div style="padding:24px 32px 0">
+      <div style="display:inline-block;background:#ede9fe;color:#6366f1;border-radius:8px;padding:6px 14px;font-size:13px;font-weight:600;margin-bottom:12px">${injuryState.affected_area ?? ""} · ${injuryState.severity ?? ""} severity</div>
+      <h1 style="margin:0 0 8px;font-size:22px;font-weight:700;color:#111827">${injuryState.injury_type}</h1>
+      <p style="margin:0 0 24px;color:#6b7280;font-size:15px;line-height:1.5">${note}</p>
+    </div>
+
+    ${doctorSection ? `<div style="padding:0 32px">${doctorSection}</div>` : ""}
+    ${timelineSection ? `<div style="padding:0 32px">${timelineSection}</div>` : ""}
+
+    <!-- Dos & Don'ts -->
+    ${(dos.length > 0 || donts.length > 0) ? `
+    <div style="padding:0 32px 24px">
+      <div style="display:grid;gap:16px">
+        ${dos.length > 0 ? `
+        <div style="background:#f0fdf4;border-radius:8px;padding:16px">
+          <div style="font-weight:600;color:#166534;margin-bottom:10px;font-size:14px">✅ Do these</div>
+          <ul style="margin:0;padding-left:4px;list-style:none">${dosHtml}</ul>
+        </div>` : ""}
+        ${donts.length > 0 ? `
+        <div style="background:#fef2f2;border-radius:8px;padding:16px">
+          <div style="font-weight:600;color:#991b1b;margin-bottom:10px;font-size:14px">🚫 Avoid these</div>
+          <ul style="margin:0;padding-left:4px;list-style:none">${dontsHtml}</ul>
+        </div>` : ""}
+      </div>
+    </div>` : ""}
+
+    <!-- Exercises -->
+    ${exercises.length > 0 ? `
+    <div style="padding:0 32px 24px">
+      <h2 style="margin:0 0 16px;font-size:17px;font-weight:700;color:#111827">🏋️ Your exercise plan</h2>
+      <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+        <tbody>${exerciseHtml}</tbody>
+      </table>
+    </div>` : ""}
+
+    <!-- Footer -->
+    <div style="background:#f9fafb;padding:20px 32px;border-top:1px solid #e5e7eb">
+      <p style="margin:0;color:#9ca3af;font-size:12px;line-height:1.6">
+        This plan was generated by Recover AI. Always consult a licensed physical therapist or physician before beginning any exercise program, especially if pain worsens.<br><br>
+        © Recover · <a href="#" style="color:#6366f1;text-decoration:none">Unsubscribe</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
     const emailResult = await resend.emails.send({
       from: "Recover <onboarding@resend.dev>",
       to: "aishwaryagune@gmail.com",
-      subject: type === "exercise" ? "Your recovery exercises 💪" : "Recovery check-in",
-      html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px"><h2 style="color:#6366f1">Recover</h2><p>${note}</p><h3>${injuryState.injury_type} — exercises:</h3><ul>${exerciseHtml}</ul><p style="color:#6b7280;font-size:13px">Reply with any questions.</p></div>`,
+      subject: isFollowup ? `Recovery check-in — ${injuryState.injury_type}` : `Your ${injuryState.injury_type} recovery plan 💪`,
+      html,
     });
     console.log("[Resend] send result:", JSON.stringify(emailResult));
     if ((emailResult as { error?: unknown }).error) {
