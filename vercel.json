@@ -1,0 +1,19 @@
+{
+  "functions": {
+    "src/app/api/agent/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/analyze-video/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/analyze-videos-batch/route.ts": {
+      "maxDuration": 300
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/send-reminders",
+      "schedule": "*/15 * * * *"
+    }
+  ]
+}
