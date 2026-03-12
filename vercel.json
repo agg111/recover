@@ -9,11 +9,5 @@
     "src/app/api/analyze-videos-batch/route.ts": {
       "maxDuration": 300
     }
-  },
-  "crons": [
-    {
-      "path": "/api/cron/send-reminders",
-      "schedule": "*/15 * * * *"
-    }
-  ]
+  }
 }
