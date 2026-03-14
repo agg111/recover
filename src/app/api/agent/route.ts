@@ -366,7 +366,7 @@ async function executeTool(
         } catch { /* ignore malformed SSE lines */ }
         if (!evt) continue;
         if (evt.type === "progress") send("progress", { message: evt.message });
-        else if (evt.type === "result") nomadicResult = evt as typeof nomadicResult;
+        else if (evt.type === "result") nomadicResult = evt as unknown as typeof nomadicResult;
         else if (evt.type === "error") throw new Error(evt.message ?? "Video service error");
       }
     }
