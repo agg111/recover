@@ -360,12 +360,14 @@ async function executeTool(
       svcBuffer = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
+        let evt: { type: string; message?: string } | null = null;
         try {
-          const evt = JSON.parse(line.slice(6));
-          if (evt.type === "progress") send("progress", { message: evt.message });
-          else if (evt.type === "result") nomadicResult = evt;
-          else if (evt.type === "error") throw new Error(evt.message);
-        } catch { /* ignore parse errors */ }
+          evt = JSON.parse(line.slice(6));
+        } catch { /* ignore malformed SSE lines */ }
+        if (!evt) continue;
+        if (evt.type === "progress") send("progress", { message: evt.message });
+        else if (evt.type === "result") nomadicResult = evt as typeof nomadicResult;
+        else if (evt.type === "error") throw new Error(evt.message ?? "Video service error");
       }
     }
 
