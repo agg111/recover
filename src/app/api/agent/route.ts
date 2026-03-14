@@ -345,12 +345,8 @@ async function executeTool(
     const svcReader = serviceRes.body!.getReader();
     const svcDecoder = new TextDecoder();
     let svcBuffer = "";
-    let nomadicResult: {
-      phases: Array<{ timestamp: string; summary: string }>;
-      form_events: Array<{ timestamp: string; summary: string; thumbnail_url?: string }>;
-      rom_events: Array<{ timestamp: string; summary: string; thumbnail_url?: string }>;
-      pain_events: Array<{ timestamp: string; summary: string; thumbnail_url?: string }>;
-    } | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let nomadicResult: any = null;
 
     while (true) {
       const { done, value } = await svcReader.read();
@@ -360,14 +356,14 @@ async function executeTool(
       svcBuffer = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
-        let evt: { type: string; message?: string } | null = null;
+        let evt: Record<string, unknown> | null = null;
         try {
           evt = JSON.parse(line.slice(6));
         } catch { /* ignore malformed SSE lines */ }
         if (!evt) continue;
-        if (evt.type === "progress") send("progress", { message: evt.message });
-        else if (evt.type === "result") nomadicResult = evt as unknown as typeof nomadicResult;
-        else if (evt.type === "error") throw new Error(evt.message ?? "Video service error");
+        if (evt["type"] === "progress") send("progress", { message: evt["message"] as string });
+        else if (evt["type"] === "result") nomadicResult = evt as unknown as typeof nomadicResult;
+        else if (evt["type"] === "error") throw new Error((evt["message"] as string) ?? "Video service error");
       }
     }
 
