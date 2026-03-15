@@ -97,7 +97,7 @@ def run_analysis_safe(video_ids, analysis_type: AnalysisType, label: str, **kwar
             analysis_type=analysis_type,
             is_thumbnail=True,
             wait_for_completion=True,
-            timeout=300,
+            timeout=90,          # 90s per analysis type — 4 run in parallel so overall ~90s max
             **kwargs,
         )
         # Batch returns {"results": [...], "batch_metadata": {...}}
@@ -118,9 +118,11 @@ def health():
     return {"status": "ok"}
 
 
+ANALYZE_TIMEOUT = 100  # seconds — hard cap for the whole analysis step
+
 @app.post("/analyze")
 def analyze_video(req: AnalyzeRequest):
-    """Returns JSON result after full analysis completes."""
+    """Returns JSON result after full analysis completes, capped at ANALYZE_TIMEOUT seconds."""
     exercise = req.exercise_name or "rehabilitation exercise"
 
     upload_result = client.upload(req.video_url)
@@ -129,7 +131,7 @@ def analyze_video(req: AnalyzeRequest):
 
     results: dict = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {
+        future_map = {
             executor.submit(run_analysis_safe, video_id, AnalysisType.ACTION_SEGMENTATION, "segmentation"): "segmentation",
             executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "form",
                 custom_event=f"incorrect form or poor posture during {exercise}",
@@ -141,9 +143,19 @@ def analyze_video(req: AnalyzeRequest):
                 custom_event=f"compensation pattern or asymmetric movement during {exercise}",
                 use_enhanced_motion_analysis=True): "compensation",
         }
-        for fut in concurrent.futures.as_completed(futures):
-            key = futures[fut]
-            results[key] = fut.result()
+        done, not_done = concurrent.futures.wait(list(future_map.keys()), timeout=ANALYZE_TIMEOUT)
+        if not_done:
+            print(f"[NomadicML] {len(not_done)} analysis/analyses timed out after {ANALYZE_TIMEOUT}s — returning partial results")
+        for fut in done:
+            key = future_map[fut]
+            try:
+                results[key] = fut.result()
+            except Exception as e:
+                print(f"[NomadicML] {key} raised: {e}")
+                results[key] = {"events": [], "results": []}
+        for fut in not_done:
+            key = future_map[fut]
+            results[key] = {"events": [], "results": []}
 
     phases      = normalize_events(results["segmentation"].get("events", []), "phase")
     form_events = normalize_events(results["form"].get("events",         []), "form")
