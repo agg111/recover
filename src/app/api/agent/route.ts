@@ -3,10 +3,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import { fetch as undiciFetch, Agent } from "undici";
 import { supabase } from "@/lib/supabase";
 import { anthropic } from "@/lib/anthropic";
+import OpenAI from "openai";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 import { Resend } from "resend";
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const VIDEO_SERVICE_URL = process.env.VIDEO_SERVICE_URL || "http://localhost:8000";
 const longTimeoutAgent = new Agent({ headersTimeout: 600_000, bodyTimeout: 600_000 });
@@ -343,7 +346,33 @@ async function executeTool(
       if (text) send("progress", { message: text });
     }).catch(() => {});
 
-    // Call Python video service — plain JSON response
+    // Generate exercise images concurrently with video analysis
+    const exercises = (injuryState?.exercises as Array<{name:string;description:string}>) ?? [];
+    const imageGenPromise = exercises.length > 0 ? Promise.all(
+      exercises.map(async (ex) => {
+        try {
+          const img = await openai.images.generate({
+            model: "dall-e-3",
+            prompt: `A clean, medical illustration of a person performing "${ex.name}" physical therapy exercise. White background, clear form demonstration, professional physical therapy style. No text.`,
+            n: 1,
+            size: "1024x1024",
+            quality: "standard",
+          });
+          const imageUrl = img.data?.[0]?.url;
+          if (!imageUrl) return { name: ex.name, url: null };
+          // Upload to Supabase Storage to avoid DALL-E 1hr expiry
+          const imgRes = await fetch(imageUrl);
+          const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
+          const path = `exercises/generated/${Date.now()}-${ex.name.replace(/\s+/g, "-").toLowerCase()}.png`;
+          const { error } = await supabase.storage.from("media").upload(path, imgBuffer, { contentType: "image/png" });
+          if (error) return { name: ex.name, url: imageUrl }; // fallback to DALL-E URL
+          const publicUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/media/${path}`;
+          return { name: ex.name, url: publicUrl };
+        } catch { return { name: ex.name, url: null }; }
+      })
+    ) : Promise.resolve([]);
+
+    // Call Python video service — plain JSON response (runs concurrently with image gen)
     const serviceRes = await undiciFetch(`${VIDEO_SERVICE_URL}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -358,8 +387,13 @@ async function executeTool(
     if (!serviceRes.ok) throw new Error(`Video service: ${await serviceRes.text()}`);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const nomadicResult: any = await serviceRes.json();
+    const [nomadicResult, exerciseImages] = await Promise.all([serviceRes.json() as Promise<any>, imageGenPromise]);
     if (!nomadicResult) throw new Error("No result from video service");
+
+    // Store exercise images in injuryState for use in emails
+    if (exerciseImages.length > 0) {
+      setInjuryState({ ...injuryState, exercise_images: exerciseImages });
+    }
 
     await earlyInsightPromise;
     send("progress", { message: "Generating personalised feedback…" });
@@ -416,9 +450,13 @@ async function executeTool(
     const type = String(input.reminder_type);
     const isFollowup = type === "followup";
 
-    const exerciseHtml = exercises.map((e, i) => `
+    const exerciseImages = (injuryState.exercise_images as Array<{name:string;url:string|null}>) ?? [];
+    const exerciseHtml = exercises.map((e, i) => {
+      const img = exerciseImages.find(ei => ei.name === e.name);
+      return `
       <tr>
         <td style="padding:16px;border-bottom:1px solid #f3f4f6;vertical-align:top">
+          ${img?.url ? `<img src="${img.url}" alt="${e.name}" style="width:100%;max-width:400px;border-radius:8px;margin-bottom:12px;display:block">` : ""}
           <div style="display:flex;align-items:flex-start;gap:12px">
             <div style="background:#6366f1;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;text-align:center;line-height:28px">${i + 1}</div>
             <div>
@@ -428,7 +466,8 @@ async function executeTool(
             </div>
           </div>
         </td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
 
     const dosHtml = dos.map(d => `<li style="margin-bottom:6px;color:#065f46">✓ ${d}</li>`).join("");
     const dontsHtml = donts.map(d => `<li style="margin-bottom:6px;color:#991b1b">✗ ${d}</li>`).join("");
