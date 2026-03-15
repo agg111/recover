@@ -327,7 +327,7 @@ async function executeTool(
       if (text) send("progress", { message: text });
     }).catch(() => {});
 
-    // Call Python video service — reads SSE stream and forwards progress to client
+    // Call Python video service — plain JSON response
     const serviceRes = await undiciFetch(`${VIDEO_SERVICE_URL}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -341,32 +341,8 @@ async function executeTool(
 
     if (!serviceRes.ok) throw new Error(`Video service: ${await serviceRes.text()}`);
 
-    // Read SSE stream from Python service, forwarding progress and collecting result
-    const svcReader = serviceRes.body!.getReader();
-    const svcDecoder = new TextDecoder();
-    let svcBuffer = "";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let nomadicResult: any = null;
-
-    while (true) {
-      const { done, value } = await svcReader.read();
-      if (done) break;
-      svcBuffer += svcDecoder.decode(value, { stream: true });
-      const lines = svcBuffer.split("\n");
-      svcBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        let evt: Record<string, unknown> | null = null;
-        try {
-          evt = JSON.parse(line.slice(6));
-        } catch { /* ignore malformed SSE lines */ }
-        if (!evt) continue;
-        if (evt["type"] === "progress") send("progress", { message: evt["message"] as string });
-        else if (evt["type"] === "result") nomadicResult = evt as unknown as typeof nomadicResult;
-        else if (evt["type"] === "error") throw new Error((evt["message"] as string) ?? "Video service error");
-      }
-    }
-
+    const nomadicResult: any = await serviceRes.json();
     if (!nomadicResult) throw new Error("No result from video service");
 
     await earlyInsightPromise;

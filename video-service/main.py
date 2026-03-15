@@ -118,71 +118,42 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/analyze", response_model=AnalyzeResponse)
+@app.post("/analyze")
 def analyze_video(req: AnalyzeRequest):
-    try:
-        injury = req.injury_type or "general injury"
-        exercise = req.exercise_name or "rehabilitation exercise"
+    """Returns JSON result after full analysis completes."""
+    exercise = req.exercise_name or "rehabilitation exercise"
 
-        # Upload video once — reuse video_id for all analyses
-        print(f"[NomadicML] Uploading video: {req.video_url}")
-        upload_result = client.upload(req.video_url)
-        video_id = upload_result["video_id"]
-        print(f"[NomadicML] Uploaded — video_id: {video_id}")
+    upload_result = client.upload(req.video_url)
+    video_id = upload_result["video_id"]
+    print(f"[NomadicML] Uploaded — video_id: {video_id}")
 
-        # 4 parallel analyses: segmentation + 3 short targeted ASK queries
-        # custom_event must be a SHORT event description (what to detect), not an instruction
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            fut_seg = executor.submit(
-                run_analysis_safe,
-                video_id, AnalysisType.ACTION_SEGMENTATION, "segmentation",
-            )
-            fut_form = executor.submit(
-                run_analysis_safe,
-                video_id, AnalysisType.ASK, "form",
+    results: dict = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(run_analysis_safe, video_id, AnalysisType.ACTION_SEGMENTATION, "segmentation"): "segmentation",
+            executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "form",
                 custom_event=f"incorrect form or poor posture during {exercise}",
-                use_enhanced_motion_analysis=True,
-            )
-            fut_rom = executor.submit(
-                run_analysis_safe,
-                video_id, AnalysisType.ASK, "rom",
+                use_enhanced_motion_analysis=True): "form",
+            executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "rom",
                 custom_event=f"limited range of motion or incomplete movement during {exercise}",
-                use_enhanced_motion_analysis=True,
-            )
-            fut_comp = executor.submit(
-                run_analysis_safe,
-                video_id, AnalysisType.ASK, "compensation",
+                use_enhanced_motion_analysis=True): "rom",
+            executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "compensation",
                 custom_event=f"compensation pattern or asymmetric movement during {exercise}",
-                use_enhanced_motion_analysis=True,
-            )
+                use_enhanced_motion_analysis=True): "compensation",
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            key = futures[fut]
+            results[key] = fut.result()
 
-            seg_result  = fut_seg.result()
-            form_result = fut_form.result()
-            rom_result  = fut_rom.result()
-            comp_result = fut_comp.result()
+    phases      = normalize_events(results["segmentation"].get("events", []), "phase")
+    form_events = normalize_events(results["form"].get("events",         []), "form")
+    rom_events  = normalize_events(results["rom"].get("events",          []), "rom")
+    pain_events = normalize_events(results["compensation"].get("events", []), "pain")
+    all_events  = sorted(form_events + rom_events + pain_events, key=lambda e: str(e.get("timestamp", "")))
 
-        phases      = normalize_events(seg_result.get("events",  []), "phase")
-        form_events = normalize_events(form_result.get("events", []), "form")
-        rom_events  = normalize_events(rom_result.get("events",  []), "rom")
-        pain_events = normalize_events(comp_result.get("events", []), "pain")
-
-        all_events = sorted(
-            form_events + rom_events + pain_events,
-            key=lambda e: str(e.get("timestamp", "")),
-        )
-
-        return AnalyzeResponse(
-            video_id=video_id,
-            status="completed",
-            phases=phases,
-            form_events=form_events,
-            rom_events=rom_events,
-            pain_events=pain_events,
-            all_events=all_events,
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"type": "result", "video_id": video_id, "status": "completed",
+            "phases": phases, "form_events": form_events, "rom_events": rom_events,
+            "pain_events": pain_events, "all_events": all_events}
 
 
 class BatchAnalyzeRequest(BaseModel):
