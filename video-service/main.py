@@ -3,13 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
+import io
 import json
 import time
 import base64
 import tempfile
-import subprocess
 import httpx
+import av
 import anthropic
+from PIL import Image
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -47,50 +49,50 @@ class MultiviewRequest(BaseModel):
 
 # ── Frame extraction ──────────────────────────────────────────────────────────
 
-def extract_frames(video_url: str, max_frames: int = 8) -> List[str]:
-    """Download video and extract evenly-spaced frames as base64 JPEGs."""
+def extract_frames(video_url: str, max_frames: int = 8) -> List[tuple]:
+    """Download video and extract evenly-spaced frames using PyAV (no system ffmpeg needed)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         video_path = os.path.join(tmpdir, "video.mp4")
 
-        # Download video
         with httpx.Client(timeout=60, follow_redirects=True) as http:
             r = http.get(video_url)
             r.raise_for_status()
             with open(video_path, "wb") as f:
                 f.write(r.content)
 
-        # Get duration
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-            capture_output=True, text=True
-        )
-        try:
-            duration = float(probe.stdout.strip())
-        except ValueError:
-            duration = 30.0  # fallback
+        frames_b64: List[tuple] = []
+        with av.open(video_path) as container:
+            stream = container.streams.video[0]
+            stream.codec_context.skip_frame = "NONKEY"  # faster seek
 
-        # Extract frames at even intervals, scaled to max width 768px
-        fps = max_frames / max(duration, 1)
-        frames_pattern = os.path.join(tmpdir, "frame_%03d.jpg")
-        subprocess.run(
-            ["ffmpeg", "-i", video_path, "-vf",
-             f"fps={fps:.4f},scale='min(768,iw)':-2", "-q:v", "3",
-             "-frames:v", str(max_frames), frames_pattern],
-            capture_output=True
-        )
+            total = stream.frames or 0
+            time_base = float(stream.time_base) if stream.time_base else 1/30
+            duration = float(stream.duration * time_base) if stream.duration else 30.0
 
-        # Read frames sorted
-        frame_files = sorted(f for f in os.listdir(tmpdir) if f.startswith("frame_"))
-        frames_b64 = []
-        interval = duration / max(len(frame_files), 1)
-        for i, fname in enumerate(frame_files):
-            with open(os.path.join(tmpdir, fname), "rb") as fh:
-                b64 = base64.standard_b64encode(fh.read()).decode()
-                ts = _fmt_ts(i * interval)
+            # Collect frames by decoding and sampling every N-th frame
+            collected = []
+            for frame in container.decode(video=0):
+                collected.append(frame)
+
+            if not collected:
+                raise ValueError("No frames decoded from video")
+
+            step = max(1, len(collected) // max_frames)
+            sampled = collected[::step][:max_frames]
+
+            for frame in sampled:
+                img = frame.to_image()  # PIL Image
+                # Resize to max width 768
+                w, h = img.size
+                if w > 768:
+                    img = img.resize((768, int(h * 768 / w)), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                b64 = base64.standard_b64encode(buf.getvalue()).decode()
+                ts = _fmt_ts(float(frame.pts or 0) * time_base)
                 frames_b64.append((ts, b64))
 
-        return frames_b64  # list of (timestamp_str, base64_jpeg)
+        return frames_b64
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -190,10 +192,6 @@ def health():
     issues = []
     if not os.environ.get("ANTHROPIC_API_KEY"):
         issues.append("ANTHROPIC_API_KEY not set")
-    # Check ffmpeg is available
-    r = subprocess.run(["ffmpeg", "-version"], capture_output=True)
-    if r.returncode != 0:
-        issues.append("ffmpeg not found")
     return {"status": "ok" if not issues else "degraded", "issues": issues}
 
 
