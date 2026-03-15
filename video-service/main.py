@@ -23,7 +23,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+def get_claude():
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set")
+    return anthropic.Anthropic(api_key=key)
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -151,7 +155,7 @@ def analyze_frames_with_claude(
         "text": ANALYSIS_PROMPT.format(exercise=exercise, injury=injury, n=len(frames)),
     })
 
-    msg = claude.messages.create(
+    msg = get_claude().messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1500,
         messages=[{"role": "user", "content": content}],
@@ -183,7 +187,14 @@ def _normalize(events: List[dict], category: str) -> List[dict]:
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    issues = []
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        issues.append("ANTHROPIC_API_KEY not set")
+    # Check ffmpeg is available
+    r = subprocess.run(["ffmpeg", "-version"], capture_output=True)
+    if r.returncode != 0:
+        issues.append("ffmpeg not found")
+    return {"status": "ok" if not issues else "degraded", "issues": issues}
 
 
 @app.post("/analyze")
