@@ -130,32 +130,33 @@ def analyze_video(req: AnalyzeRequest):
     print(f"[NomadicML] Uploaded — video_id: {video_id}")
 
     results: dict = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        future_map = {
-            executor.submit(run_analysis_safe, video_id, AnalysisType.ACTION_SEGMENTATION, "segmentation"): "segmentation",
-            executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "form",
-                custom_event=f"incorrect form or poor posture during {exercise}",
-                use_enhanced_motion_analysis=True): "form",
-            executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "rom",
-                custom_event=f"limited range of motion or incomplete movement during {exercise}",
-                use_enhanced_motion_analysis=True): "rom",
-            executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "compensation",
-                custom_event=f"compensation pattern or asymmetric movement during {exercise}",
-                use_enhanced_motion_analysis=True): "compensation",
-        }
-        done, not_done = concurrent.futures.wait(list(future_map.keys()), timeout=ANALYZE_TIMEOUT)
-        if not_done:
-            print(f"[NomadicML] {len(not_done)} analysis/analyses timed out after {ANALYZE_TIMEOUT}s — returning partial results")
-        for fut in done:
-            key = future_map[fut]
-            try:
-                results[key] = fut.result()
-            except Exception as e:
-                print(f"[NomadicML] {key} raised: {e}")
-                results[key] = {"events": [], "results": []}
-        for fut in not_done:
-            key = future_map[fut]
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    future_map = {
+        executor.submit(run_analysis_safe, video_id, AnalysisType.ACTION_SEGMENTATION, "segmentation"): "segmentation",
+        executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "form",
+            custom_event=f"incorrect form or poor posture during {exercise}",
+            use_enhanced_motion_analysis=True): "form",
+        executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "rom",
+            custom_event=f"limited range of motion or incomplete movement during {exercise}",
+            use_enhanced_motion_analysis=True): "rom",
+        executor.submit(run_analysis_safe, video_id, AnalysisType.ASK, "compensation",
+            custom_event=f"compensation pattern or asymmetric movement during {exercise}",
+            use_enhanced_motion_analysis=True): "compensation",
+    }
+    done, not_done = concurrent.futures.wait(list(future_map.keys()), timeout=ANALYZE_TIMEOUT)
+    executor.shutdown(wait=False)  # don't block — let slow threads die on their own
+    if not_done:
+        print(f"[NomadicML] {len(not_done)} analysis/analyses timed out after {ANALYZE_TIMEOUT}s — returning partial results")
+    for fut in done:
+        key = future_map[fut]
+        try:
+            results[key] = fut.result()
+        except Exception as e:
+            print(f"[NomadicML] {key} raised: {e}")
             results[key] = {"events": [], "results": []}
+    for fut in not_done:
+        key = future_map[fut]
+        results[key] = {"events": [], "results": []}
 
     phases      = normalize_events(results["segmentation"].get("events", []), "phase")
     form_events = normalize_events(results["form"].get("events",         []), "form")
