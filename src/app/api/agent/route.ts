@@ -52,7 +52,7 @@ function getSystemPrompt() {
   return `You are Recover, an AI physical therapist. You help patients recover from injuries through personalized exercise guidance and real-time form analysis.
 
 CURRENT DATE & TIME: ${dateStr}, ${timeStr}
-When the user says "today", "tomorrow", "tonight", "9 AM", etc., resolve it against this date/time and pass a precise ISO 8601 datetime to scheduled_at (e.g. "2026-03-10T09:00:00").
+When the user says "today", "tomorrow", "tonight", "9 AM", etc., resolve it against this date/time and pass a precise ISO 8601 datetime to scheduled_at. Always include the PST/PDT offset — e.g. "2026-03-10T20:00:00-07:00" for 8 PM PDT or "2026-03-10T20:00:00-08:00" for 8 PM PST. Never pass a bare datetime without timezone offset.
 
 SCOPE — STRICTLY ENFORCED:
 You ONLY discuss topics directly related to: injury recovery, physical therapy, exercise form, rehabilitation, pain management, and related medical guidance.
@@ -544,7 +544,12 @@ async function executeTool(
 </html>`;
 
     // Build .ics calendar attachment if a scheduled time was provided
-    const scheduledAt = input.scheduled_at ? new Date(String(input.scheduled_at)) : null;
+    // If no timezone offset in the string, treat as America/Los_Angeles (UTC-7 PDT / UTC-8 PST)
+    const rawScheduled = input.scheduled_at ? String(input.scheduled_at) : null;
+    const scheduledAtStr = rawScheduled && !rawScheduled.includes("Z") && !rawScheduled.match(/[+-]\d{2}:?\d{2}$/)
+      ? rawScheduled + (new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "shortOffset" }).includes("GMT-7") ? "-07:00" : "-08:00")
+      : rawScheduled;
+    const scheduledAt = scheduledAtStr ? new Date(scheduledAtStr) : null;
     const icsAttachment = scheduledAt && !isNaN(scheduledAt.getTime()) ? buildIcs({
       summary: `Recovery session — ${injuryState.injury_type}`,
       description: `Your ${injuryState.injury_type} exercise session. Open the Recover app to log your progress.`,
