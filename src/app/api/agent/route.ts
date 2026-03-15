@@ -347,6 +347,8 @@ async function executeTool(
       if (text) send("progress", { message: text });
     }).catch(() => {});
 
+    send("progress", { message: "This takes a minute or two — hang tight while the AI analyzes your movement…" });
+
     // Generate exercise images concurrently with video analysis
     const exercises = (injuryState?.exercises as Array<{name:string;description:string}>) ?? [];
     const imageGenPromise = exercises.length > 0 ? Promise.all(
