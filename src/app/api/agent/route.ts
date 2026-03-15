@@ -44,15 +44,15 @@ function buildIcs({ summary, description, start, durationMinutes }: {
   ].join("\r\n");
 }
 
-function getSystemPrompt() {
+function getSystemPrompt(timezone = "America/Los_Angeles") {
   const now = new Date();
-  const dateStr = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Los_Angeles" });
-  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/Los_Angeles", timeZoneName: "short" });
+  const dateStr = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: timezone });
+  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: timezone, timeZoneName: "shortOffset" });
 
   return `You are Recover, an AI physical therapist. You help patients recover from injuries through personalized exercise guidance and real-time form analysis.
 
-CURRENT DATE & TIME: ${dateStr}, ${timeStr}
-When the user says "today", "tomorrow", "tonight", "9 AM", etc., resolve it against this date/time and pass a precise ISO 8601 datetime to scheduled_at. Always include the PST/PDT offset — e.g. "2026-03-10T20:00:00-07:00" for 8 PM PDT or "2026-03-10T20:00:00-08:00" for 8 PM PST. Never pass a bare datetime without timezone offset.
+CURRENT DATE & TIME: ${dateStr}, ${timeStr} (user's timezone: ${timezone})
+When the user says "today", "tomorrow", "tonight", "9 AM", etc., resolve it against this date/time in the user's timezone and pass a precise ISO 8601 datetime with offset to scheduled_at (e.g. "2026-03-10T20:00:00-07:00"). Never pass a bare datetime without timezone offset.
 
 SCOPE — STRICTLY ENFORCED:
 You ONLY discuss topics directly related to: injury recovery, physical therapy, exercise form, rehabilitation, pain management, and related medical guidance.
@@ -200,11 +200,12 @@ export async function POST(req: NextRequest) {
 
       try {
         const body = await req.json();
-        const { messages, userId, injuryContext, threadId } = body as {
+        const { messages, userId, injuryContext, threadId, timezone } = body as {
           messages: Array<{ role: "user" | "assistant"; content: string | Anthropic.ContentBlockParam[] }>;
           userId?: string;
           injuryContext?: Record<string, unknown> | null;
           threadId?: string;
+          timezone?: string;
         };
 
         // Rate limit: max 20 user messages per thread
@@ -230,7 +231,7 @@ export async function POST(req: NextRequest) {
           const stream = anthropic.messages.stream({
             model: "claude-sonnet-4-6",
             max_tokens: 1024,
-            system: getSystemPrompt(),
+            system: getSystemPrompt(timezone),
             tools: TOOLS,
             messages: loopMessages,
           });
@@ -255,7 +256,7 @@ export async function POST(req: NextRequest) {
 
             let result: string;
             try {
-              result = await executeTool(block.name, input, { send, userId, injuryState, setInjuryState: (s) => { injuryState = s; } });
+              result = await executeTool(block.name, input, { send, userId, timezone, injuryState, setInjuryState: (s) => { injuryState = s; } });
             } catch (e) {
               console.error(`Tool error (${block.name}):`, e);
               result = "Tool encountered an error. Please try again.";
@@ -308,9 +309,9 @@ type SendFn = (type: string, payload: Record<string, unknown> | string) => void;
 async function executeTool(
   name: string,
   input: Record<string, unknown>,
-  ctx: { send: SendFn; userId?: string; injuryState: Record<string, unknown> | null; setInjuryState: (s: Record<string, unknown>) => void }
+  ctx: { send: SendFn; userId?: string; timezone?: string; injuryState: Record<string, unknown> | null; setInjuryState: (s: Record<string, unknown>) => void }
 ): Promise<string> {
-  const { send, userId, injuryState, setInjuryState } = ctx;
+  const { send, userId, timezone, injuryState, setInjuryState } = ctx;
 
   if (name === "save_injury_profile") {
     const { data } = await supabase
@@ -546,8 +547,9 @@ async function executeTool(
     // Build .ics calendar attachment if a scheduled time was provided
     // If no timezone offset in the string, treat as America/Los_Angeles (UTC-7 PDT / UTC-8 PST)
     const rawScheduled = input.scheduled_at ? String(input.scheduled_at) : null;
+    const userTz = timezone ?? "America/Los_Angeles";
     const scheduledAtStr = rawScheduled && !rawScheduled.includes("Z") && !rawScheduled.match(/[+-]\d{2}:?\d{2}$/)
-      ? rawScheduled + (new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "shortOffset" }).includes("GMT-7") ? "-07:00" : "-08:00")
+      ? rawScheduled + (new Date().toLocaleString("en-US", { timeZone: userTz, timeZoneName: "shortOffset" }).match(/GMT([+-]\d+(?::\d+)?)/) ?? ["", "-08:00"])[1].padEnd(6, ":00")
       : rawScheduled;
     const scheduledAt = scheduledAtStr ? new Date(scheduledAtStr) : null;
     const icsAttachment = scheduledAt && !isNaN(scheduledAt.getTime()) ? buildIcs({
